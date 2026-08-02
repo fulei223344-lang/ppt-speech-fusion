@@ -3,7 +3,7 @@ name: ppt-speech-fusion
 slug: ppt-speech-fusion
 displayName: PPT演讲稿
 description: 会议录音+PPT一键生成演讲复原稿PDF。丢入录音和PPT文件，自动转写对话、提取幻灯片、逐页对齐生成上半页演讲叙述+下半页原版幻灯片的专业PDF，内置自检。适用于会议纪要、汇报整理、演讲复盘。支持 m4a/mp3/wav 音频 + pptx。
-version: 1.0.2
+version: 1.0.3
 author: ethan
 trigger:
   - "把录音和PPT整理成演讲稿"
@@ -64,7 +64,7 @@ trigger:
 
 ## 输出格式
 
-- 文件：\`{PPT主题}_演讲复原稿.pdf\`
+- 文件：`{PPT主题}_演讲复原稿.pdf`
 - 自检结果以 Markdown 表格呈现，逐项标注通过/修复情况
 
 ## 所需能力（平台自行映射）
@@ -92,3 +92,99 @@ trigger:
 - 若 PPT 格式不支持：提示用户确认文件为 .pptx 格式
 - 若音频质量过差导致转写率低：告知用户并建议使用更清晰的录音
 - 若 PPT 页数过多（超过 50 页）：提示用户可能耗时较长，确认是否继续
+
+## WorkBuddy 执行映射（附录）
+
+在 WorkBuddy 环境中，以下为确定性工具链映射，直接使用无需用户额外配置。
+
+### 环境准备（首次执行时自动完成）
+
+```bash
+pip install openai-whisper python-pptx Pillow reportlab PyMuPDF 2>&1
+```
+
+### 阶段一：音频转写
+
+```python
+import whisper
+model = whisper.load_model("medium")
+result = model.transcribe("录音文件路径", language="zh")
+with open("转写文本.txt", "w") as f:
+    f.write(result["text"])
+```
+
+- 若录音超过 1 小时，先用 `ffmpeg -i 录音.m4a -ac 1 -ar 16000 录音_16k.wav` 预处理加速
+
+### 阶段二：PPT 截图 + 生成 PDF
+
+**A. PPT 截图（二选一，优先 LibreOffice）**
+
+方案一（推荐）：
+```bash
+soffice --headless --convert-to pdf 文件.pptx
+python3 -c "
+import fitz
+doc = fitz.open('文件.pdf')
+for i, page in enumerate(doc):
+    pix = page.get_pixmap(dpi=200)
+    pix.save(f'slide_{i+1:02d}.png')
+"
+```
+
+方案二（无 LibreOffice 时降级）：
+```python
+from pptx import Presentation
+from PIL import Image, ImageDraw, ImageFont
+prs = Presentation('文件.pptx')
+for i, slide in enumerate(prs.slides):
+    img = Image.new('RGB', (1280, 720), 'white')
+    draw = ImageDraw.Draw(img)
+    y = 20
+    for shape in slide.shapes:
+        if shape.has_text_frame:
+            for para in shape.text_frame.paragraphs:
+                draw.text((40, y), para.text, fill='black')
+                y += 24
+    img.save(f'slide_{i+1:02d}.png')
+```
+
+**B. 生成最终 PDF**
+
+```python
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Image, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import mm
+
+doc = SimpleDocTemplate("演讲复原稿.pdf", pagesize=A4)
+styles = getSampleStyleSheet()
+story = []
+
+for i, text in enumerate(叙述文本数组):
+    story.append(Paragraph(f"第{i+1}页", styles['Heading2']))
+    story.append(Paragraph(text, styles['Normal']))
+    story.append(Spacer(1, 10*mm))
+    story.append(Image(f"slide_{i+1:02d}.png", width=180*mm, height=100*mm))
+    story.append(Spacer(1, 5*mm))
+
+doc.build(story)
+```
+
+### 阶段三：自检
+
+```python
+import os
+slides = sorted([f for f in os.listdir('.') if f.startswith('slide_')])
+print(f"PPT 页数: {len(slides)}")
+print(f"叙述文本数: {len(叙述文本数组)}")
+print(f"页数匹配: {len(slides) == len(叙述文本数组)}")
+# 抽查叙述文本非空
+for i, t in enumerate(叙述文本数组):
+    if len(t) < 30:
+        print(f"⚠ 第{i+1}页叙述过短")
+```
+
+### 产出物
+
+- `{PPT主题}_演讲复原稿.pdf` — 最终交付文件
+- `转写文本.txt` / `slide_*.png` — 中间产物（任务结束可清理）
